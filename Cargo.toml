@@ -1,0 +1,17 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+
+# The six-move search walks hundreds of millions of positions, so even the
+# normal (debug) Run in RustRover is built with optimizations. Set this to 0
+# if you want to step through the code in the debugger.
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+codegen-units = 1
+lto = true

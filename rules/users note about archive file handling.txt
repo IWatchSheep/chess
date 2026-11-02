@@ -1,0 +1,221 @@
+[
+original words from user:
+"
+read the text. the whole point of the extra old files is to go make list 1, then read the archives and make a better strategy 1, and I think it also allows list 3 to make a better guess of forming strategies. But the old files count 4 past moves, 1 present move, 1 future move, everything else is deleted. So the only files will hold the end of game 4 past move, 1 present move, 1 future move, it won't hold middle game, or start of game to learn from. This won't help lists 1 and 3 form. So we need to revise the two rules forms and make it so the files made keep records that can help lists 1 and 3 strategize which they have access to read archives using the neural network."
+
++ 
+"The_Two_Things_AI_Will_Never_Do" is a youtube video discussing the limitations of ai. We need to revise the rules I made and the rules grok made to have archives that hold the entire games moves for both sides, past links to present links to future, so the archives need to sort out each move into past, present, future, chunks for the ai to read when it reads the archives. 
+"
+
++
+
+"
+explicitly said: use [(the four past turns) + (the current turn) + (the future turn)] for the entire game, for both sides = 1 archive file.
+"
+
++
+
+"
+all the pieces need to show in the past, present, future, turns in the archive. And because memory is limited sort the archives in a list we call memory, then sort the useful memories to the front and then limit the ai to some number of memory. The archives need to belong to a sortable list = memory / learning.
+
+Then you could have memory banks of lists of memories for tasks like the claude grid board each one of those solved would belong in a memory bank able to be recalled to help strategy lists 1 and 3.
+"
+]
+
+chatgpt interpretation: 
+"
+# Required Revision: Permanent Chess Game Archives for Improving Lists 1 and 3
+
+Please carefully read both chess rule documents before making any changes.
+
+I want to clarify why I requested permanent neural-network learning files and what I expect them to accomplish.
+
+## 1. The purpose of the permanent archives
+
+The primary purpose of these files is to help the neural network improve the identification and evaluation of forming chess strategies in **List 1 and List 3**.
+
+The existing chess program already creates List 1 by examining the player's recent move history, current position, and future legal moves against the 20 chess strategies.
+
+I want to preserve that original process.
+
+However, after List 1 has been generated, I want the neural network to be able to consult the permanent archives, use information learned from previous games, and produce an improved strategy assessment for comparison with the original List 1.
+
+The same capability should apply to List 3, where the neural network can use previous game experience to improve its assessment of strategies forming in future positions.
+
+The neural network must supplement the original strategy calculations, not silently replace them.
+
+## 2. The problem with the existing history files
+
+The existing history files retain only a limited rolling window:
+
+- The previous four turns belonging to the evaluated player.
+- The player's current turn, when applicable.
+- The future-search information required by the original rules.
+
+Older history is removed as the game progresses.
+
+This is appropriate for calculating the current strategy lists, but it is insufficient for building a permanent learning archive.
+
+For example, if a game lasts 80 moves and the program saves only the contents of its rolling history files at the end, most of the opening and middlegame information will already have been discarded.
+
+The neural network would receive only the remaining endgame history.
+
+**That is not what I want.**
+
+## 3. Preserve information throughout the entire game
+
+When the player chooses to record a game for AI learning, the program must preserve the relevant information as the game progresses.
+
+This includes:
+
+1. Opening positions and moves.
+2. Middlegame positions and moves.
+3. Endgame positions and moves.
+4. The move history needed to interpret strategy development.
+5. The original List 1 strategy evaluations.
+6. The List 3 strategy evaluations associated with their possible future moves.
+7. The relevant existing future-search information.
+8. The final game result, when available.
+
+The archive must retain the sequence and context of these records so the neural network can study how strategies began, developed, succeeded, failed, or disappeared during a game.
+
+Do not wait until the game ends and then save only the remaining rolling history.
+
+## 4. Keep the existing operational files
+
+Do not remove or redesign the existing White and Black history files or the White and Black future-search files.
+
+These four operational files must continue to function according to the original chess rules.
+
+They may continue to discard outdated information when updating their rolling windows.
+
+However, when AI recording is enabled, the information selected for permanent retention must be preserved **before the operational files discard or overwrite it**.
+
+The permanent archives must be stored separately from the four operational files.
+
+Keep the existing data formats wherever possible, adding only the information needed to identify games, moves, positions, and their relationships.
+
+## 5. Optional recording at the beginning of every game
+
+At the beginning of each new game, ask:
+
+**"Do you want to add this game's information to the permanent AI learning archives? (Y/N)"**
+
+If the player selects **Y**:
+
+- Record the game's relevant information throughout the entire game.
+- Append the new records to the permanent archives.
+- Preserve all previously saved games.
+- Do not erase or overwrite earlier learning records.
+
+If the player selects **N**:
+
+- Do not add this game's information to the permanent archives.
+- Continue playing chess normally.
+- Continue creating and updating the four operational files.
+- Do not delete any previously archived games.
+
+The recording choice must not change chess rules, strategy definitions, legal moves, or future-search depth.
+
+## 6. How List 1 uses the neural network
+
+List 1 must first be generated using the existing rules and the authoritative 20 chess strategy definitions.
+
+After that:
+
+1. The neural network may consult knowledge developed from the permanent archives.
+2. It may evaluate the current position and relevant history.
+3. It may produce its own predictions about which strategies are forming and how promising they are.
+4. These predictions must be clearly distinguished from the original List 1 results.
+5. Both the original strategy scores and the neural-network recommendations must remain available for comparison.
+
+The neural network must not secretly change the original strategy-recognition conditions or their established development scores.
+
+## 7. How List 3 uses the neural network
+
+List 3 must continue to evaluate forming strategies for every legal candidate move according to the original rules.
+
+For each candidate move:
+
+1. Generate the original List 3 strategy evaluation.
+2. Keep that evaluation associated with the candidate move and resulting position.
+3. Allow the neural network to examine that position using knowledge developed from archived games.
+4. Produce a separate AI-assisted prediction about the likely development and usefulness of those strategies.
+5. Preserve the original result alongside the AI-assisted result.
+
+The purpose is to help compare possible future moves using both the original chess strategy rules and experience accumulated from previous games.
+
+The neural network must not merge the results for different candidate moves into one undifferentiated list.
+
+## 8. Recording data is not the same as learning
+
+Saving game records does not automatically mean that the neural network has learned from them.
+
+The design must provide for two separate operations:
+
+**Archiving:** Permanently recording selected games and their strategy information.
+
+**Learning:** Training or updating the neural network using archived information, with appropriate verification.
+
+The neural network's predictions must be based on actual trained weights or explicitly identified archive retrieval, not simply described as learned knowledge when no learning has occurred.
+
+## 9. Preserve the original six-ply search
+
+My original rules specify three full turns of future analysis, which equals **six individual moves (six plies)**.
+
+This requirement must not be reduced to four plies.
+
+The four-ply change introduced in the Grok-and-Claude interpretation was not authorized.
+
+List 3 must reuse the existing future-search results as specified in the original rules, without independently extending the search beyond the required six-ply limit.
+
+Performance concerns must be addressed through implementation and optimization rather than silently changing the required search depth.
+
+## 10. Revise both rule documents
+
+Please revise both documents:
+
+1. `created_by_the_user_original_rules.txt`
+2. `created_by_the_user_original_rules_and_interpreted_by_grok_and_claude.txt`
+
+Both revised documents must clearly describe:
+
+- The purpose of permanent AI learning archives.
+- The difference between rolling operational files and permanent archives.
+- Recording information throughout the entire game.
+- Optional recording controlled by Y/N at the start of a game.
+- How the neural network assists List 1.
+- How the neural network assists List 3.
+- Keeping original strategy evaluations separate from AI-assisted predictions.
+- Preserving the original 20 strategy definitions and development-scoring rules.
+- Preserving the original six-ply future search.
+
+Do not change other chess requirements unless necessary to resolve a specific inconsistency, and identify any such proposed change before applying it.
+
+## 11. Required tests
+
+Please include tests verifying that:
+
+1. Opening, middlegame, and endgame records are preserved when recording is enabled.
+2. A game lasting longer than the rolling history window does not lose its earlier archived information.
+3. Multiple recorded games accumulate without erasing previous records.
+4. Selecting N does not change the permanent archives.
+5. Original List 1 results remain unchanged when AI assistance is enabled.
+6. Original List 3 results remain unchanged when AI assistance is enabled.
+7. AI-assisted results remain associated with the correct player, position, and candidate move.
+8. The neural network can retrieve or learn from archived game information through the implemented interface.
+9. The complete six-ply search requirement remains intact.
+10. All previously passing chess tests continue to pass.
+
+## Final objective
+
+**I do not want permanent archives that contain only the last few moves of each game.**
+
+I want the program to accumulate useful information from the entire history of every game selected for recording.
+
+The neural network must be able to learn from that accumulated experience and provide additional assessments that help List 1 and List 3 identify and compare chess strategies.
+
+The existing chess engine, 20 strategy definitions, original scoring system, four operational files, and six-ply future search must remain intact.
+
+Please update both rule documents to express this requirement precisely before handing the implementation work to the coding agent.
+". I read and agree with this.
