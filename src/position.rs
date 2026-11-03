@@ -56,6 +56,11 @@ pub struct EvalContext<'a> {
     pub side: Color,
     pub moves: &'a [RecordedMove],
     pub window: Vec<RecordedMove>,
+    /// Set by the six-move search, which needs only the foundation, progress and
+    /// completion flags: each strategy then returns as soon as its flags are
+    /// settled, without the participants, targets and evidence text. The flags
+    /// are the same either way (`tests/strategies.rs` checks this).
+    pub flags_only: bool,
 }
 
 impl<'a> EvalContext<'a> {
@@ -66,7 +71,13 @@ impl<'a> EvalContext<'a> {
             side,
             moves,
             window: history_window(moves, side, board.turn()),
+            flags_only: false,
         }
+    }
+
+    /// The same context for reading only the three flags of each strategy.
+    pub fn flags_only(board: &'a Board, side: Color, moves: &'a [RecordedMove]) -> EvalContext<'a> {
+        EvalContext { flags_only: true, ..EvalContext::new(board, side, moves) }
     }
 }
 

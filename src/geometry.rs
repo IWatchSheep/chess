@@ -180,7 +180,30 @@ pub fn attacked_squares_ignoring(pos: &Position, from: Square, kind: PieceKind, 
     out
 }
 
+/// True when `unit` geometrically attacks `target`: the same answer as
+/// `attacked_squares(pos, unit.square, unit.kind, unit.color).contains(&target)`
+/// (see [`attacks_square_reference`]), worked out without listing every square.
 pub fn attacks_square(pos: &Position, unit: &Unit, target: Square) -> bool {
+    let (df, dr) = (file_of(target) - file_of(unit.square), rank_of(target) - rank_of(unit.square));
+    match unit.kind {
+        PieceKind::Pawn => dr == unit.color.forward() && df.abs() == 1,
+        PieceKind::Knight => KNIGHT_DELTAS.contains(&(df, dr)),
+        PieceKind::King => (df, dr) != (0, 0) && df.abs() <= 1 && dr.abs() <= 1,
+        kind => {
+            let (sf, sr) = (df.signum(), dr.signum());
+            let on_line = (df == 0 || dr == 0 || df.abs() == dr.abs()) && (df, dr) != (0, 0);
+            if !on_line || !slider_dirs(kind).contains(&(sf, sr)) {
+                return false;
+            }
+            let steps = df.abs().max(dr.abs());
+            let (f0, r0) = (file_of(unit.square), rank_of(unit.square));
+            (1..steps).all(|k| square(f0 + sf * k, r0 + sr * k).is_some_and(|sq| pos.at(sq).is_none()))
+        }
+    }
+}
+
+/// The original definition of [`attacks_square`], kept for the tests.
+pub fn attacks_square_reference(pos: &Position, unit: &Unit, target: Square) -> bool {
     attacked_squares(pos, unit.square, unit.kind, unit.color).contains(&target)
 }
 

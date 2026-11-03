@@ -52,6 +52,11 @@ fn empty(evidence: &str) -> StrategyReading {
     }
 }
 
+/// The three flags alone, for the six-move search (`EvalContext::flags_only`).
+fn flags(foundation: bool, progress: bool, completion: bool) -> StrategyReading {
+    StrategyReading { foundation, progress, completion, participants: vec![], targets: vec![], evidence: String::new() }
+}
+
 fn reading(
     foundation: bool,
     progress: bool,
@@ -112,6 +117,9 @@ fn central_pawn_occupation(ctx: &EvalContext) -> StrategyReading {
     let completion = occupied.len() == 2 && occupied.iter().all(|&s| !units_attacking(pos, s, side).is_empty());
     if !foundation && !progress && !completion {
         return empty("No friendly pawn remains on the d-file or the e-file.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let defenders: Vec<Unit> = occupied.iter().flat_map(|&s| units_attacking(pos, s, side)).collect();
     let zone_targets: Vec<Unit> = sqs(&["c4", "d4", "e4", "f4", "c5", "d5", "e5", "f5"])
@@ -177,6 +185,9 @@ fn central_pawn_break(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("No central pawn break is prepared against an opposing central pawn.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let targets: Vec<Unit> = enemy_central
         .iter()
         .filter(|t| attacking.iter().any(|a| hits(a, t)))
@@ -210,6 +221,9 @@ fn kingside_pawn_storm(ctx: &EvalContext) -> StrategyReading {
     let completion = advanced >= 2 && king.is_some_and(|k| file_of(k.square) <= 3);
     if !foundation && !progress && !completion {
         return empty("The f-, g-, and h-pawns have not started a storm away from the king.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let wing_targets: Vec<Unit> = pos
         .of(enemy)
@@ -263,6 +277,9 @@ fn queenside_minority(ctx: &EvalContext) -> StrategyReading {
     let completion = deep && weakness;
     if !foundation && !progress && !completion {
         return empty("There is no queenside pawn majority for the opponent to attack.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let majors: Vec<Unit> = pos.of(side).into_iter().filter(|u| is_major(u) && file_of(u.square) <= 3).collect();
     let evidence = if completion {
@@ -329,6 +346,9 @@ fn king_shelter(ctx: &EvalContext) -> StrategyReading {
     let completion = kingside_ok || queenside_ok;
     if !foundation && !progress && !completion {
         return empty("Castling rights are gone and the king is not on a castled square.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let shelter: Vec<Square> = if kingside_ok {
         ks_shield
@@ -403,6 +423,9 @@ fn opposite_castling_attack(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("The kings are not castled on opposite wings.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let majors: Vec<Unit> = pos.of(side).into_iter().filter(|u| is_major(u) && wing.contains(&file_of(u.square))).collect();
     let targets: Vec<Unit> = pos
         .of(enemy)
@@ -462,6 +485,9 @@ fn fianchetto(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("Neither the b-pawn nor the g-pawn has opened a fianchetto square.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let participants: Vec<Unit> = read
         .iter()
         .filter(|w| w.foundation || w.progress)
@@ -510,6 +536,9 @@ fn open_file_control(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("Every file that contains a friendly major piece also contains a friendly pawn.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let targets: Vec<Unit> = majors.iter().flat_map(|u| enemy_units_attacked_by(pos, u)).collect();
     let open_names: Vec<String> = (0..8)
         .filter(|&f| pawns_on_file(pos, f, None).is_empty())
@@ -545,6 +574,9 @@ fn seventh_rank(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("No rook or queen has a pawn-free file toward the seventh rank.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let targets: Vec<Unit> = advanced.iter().flat_map(|u| enemy_units_attacked_by(pos, u)).collect();
     let rank_label = if side == Color::White { "7" } else { "2" };
     let evidence = if completion {
@@ -577,6 +609,9 @@ fn passed_pawn_advance(ctx: &EvalContext) -> StrategyReading {
     let completion = !deep.is_empty();
     if !foundation && !progress && !completion {
         return empty("No friendly pawn is passed.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let featured = if completion { deep.clone() } else if progress { moved.clone() } else { passed.clone() };
     let defenders: Vec<Unit> = featured.iter().flat_map(|p| units_attacking(pos, p.square, side)).collect();
@@ -634,6 +669,9 @@ fn isolated_pawn_attack(ctx: &EvalContext) -> StrategyReading {
     let completion = !winning.is_empty();
     if !foundation && !progress && !completion {
         return empty("The opponent has no isolated pawn.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let focus = if completion { &winning } else if progress { &pressured } else { &isolated };
     let participants: Vec<Unit> = focus
@@ -708,6 +746,9 @@ fn backward_pawn_pressure(ctx: &EvalContext) -> StrategyReading {
     let completion = !completed.is_empty();
     if !foundation && !progress && !completion {
         return empty("The opponent has no backward pawn on a half-open file.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let focus = if completion { &completed } else if progress { &filed } else { &backward };
     let participants: Vec<Unit> = focus
@@ -801,6 +842,9 @@ fn knight_outpost(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("No pawn-defended square in the opponent's half is safe from enemy pawns.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let relevant: Vec<Unit> = if completion {
         occupying.clone()
     } else if progress {
@@ -845,6 +889,9 @@ fn bishop_pair(ctx: &EvalContext) -> StrategyReading {
     let completion = progress && open_center && long_range;
     if !foundation && !progress && !completion {
         return empty("The bishop pair is not ahead of the opponent's bishops.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let mut targets: Vec<Unit> = bishops.iter().flat_map(|b| enemy_units_attacked_by(pos, b)).collect();
     targets.extend(pos.of_kind(enemy, PieceKind::Knight).into_iter().filter(|n| {
@@ -928,6 +975,9 @@ fn pin(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("No slider is aligned with a lesser piece and a heavier piece behind it.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let relevant = if progress { &clear } else { &lineups };
     let mut participants: Vec<Unit> = relevant.iter().map(|l| l.slider).collect();
     participants.extend(clear.iter().flat_map(second));
@@ -968,6 +1018,9 @@ fn skewer(ctx: &EvalContext) -> StrategyReading {
     });
     if !foundation && !progress && !completion {
         return empty("No slider is aligned with a heavier piece in front of a lighter one.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let relevant = if progress { &clear } else { &lineups };
     let evidence = if completion {
@@ -1056,8 +1109,14 @@ fn discovered_attack(ctx: &EvalContext) -> StrategyReading {
             if attacks && (m.is_capture() || next.is_check()) {
                 completion = true;
                 forcing.push(d.screen.square);
+                if ctx.flags_only {
+                    return flags(true, true, true);
+                }
             }
         }
+    }
+    if ctx.flags_only {
+        return flags(true, progress, completion);
     }
     let participants: Vec<Unit> = discoveries
         .iter()
@@ -1134,8 +1193,13 @@ fn fork(ctx: &EvalContext) -> StrategyReading {
             targets.extend(current);
         }
     }
-    if !completion {
+    // With only the flags wanted, this pass can stop once the foundation is
+    // known: it changes nothing else.
+    if !completion && !(ctx.flags_only && foundation) {
         for m in moves_for(ctx.board, side) {
+            if ctx.flags_only && foundation {
+                break;
+            }
             let kind = m.promotion.unwrap_or(m.piece);
             if kind == PieceKind::King {
                 continue;
@@ -1154,6 +1218,9 @@ fn fork(ctx: &EvalContext) -> StrategyReading {
     }
     if !foundation && !progress && !completion {
         return empty("No piece attacks, or can move to a square attacking, two opposing pieces above pawn value.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let evidence = if completion {
         "A piece currently attacks two targets that are undefended, royal, or at least as valuable as the attacker."
@@ -1230,6 +1297,9 @@ fn major_battery(ctx: &EvalContext) -> StrategyReading {
     if !foundation && !progress && !completion {
         return empty("The rooks and queen are not gathered on a shared file or rank.");
     }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
+    }
     let chosen: Vec<&Pair> = if completion {
         completed
     } else if progress {
@@ -1260,7 +1330,11 @@ fn promotion(ctx: &EvalContext) -> StrategyReading {
     let foundation = !advanced.is_empty();
     let deep: Vec<Unit> = advanced.iter().filter(|p| relative_rank(side, p.square) >= 5).copied().collect();
     let progress = !deep.is_empty();
-    let promoting: Vec<Square> = moves_for(ctx.board, side)
+    // A promotion can only be made by a pawn on the seventh rank, so without
+    // one there is no promoting legal move to look for.
+    let on_seventh = deep.iter().any(|p| relative_rank(side, p.square) == 6);
+    let candidates = if on_seventh { moves_for(ctx.board, side) } else { Vec::new() };
+    let promoting: Vec<Square> = candidates
         .into_iter()
         .filter(|m| m.piece == PieceKind::Pawn && m.promotion.is_some())
         .map(|m| m.from)
@@ -1273,6 +1347,9 @@ fn promotion(ctx: &EvalContext) -> StrategyReading {
     let completion = !promoting.is_empty();
     if !foundation && !progress && !completion {
         return empty("No pawn has reached the opponent's half of the board.");
+    }
+    if ctx.flags_only {
+        return flags(foundation, progress, completion);
     }
     let featured: Vec<Unit> = if completion {
         advanced.iter().filter(|p| promoting.contains(&p.square)).copied().collect()

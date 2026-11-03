@@ -11,6 +11,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+use chess::archive::{self as archive, archive_dir, GameArchive, GameStatus, Outcome, WorkingFiles, MEMORY_LIMIT, RECORD_QUESTION};
 use chess::board::{parse_square, square_name, Board, Color, Move, PieceKind, START_FEN};
 use chess::evaluate::{
     describe_capture, evaluate_stored, format_material, format_signed, list3_after_stored, list3_all_stored, list4_after_stored,
@@ -36,7 +37,9 @@ struct Game {
     keys: Vec<String>,
     files: GameFiles,
     /// Set when a player resigns or both agree to a draw.
-    ended: Option<String>,
+    ended: Option<Outcome>,
+    /// The permanent archive file of this game, when the player chose to record it.
+    archive: Option<GameArchive>,
 }
 
 enum Input {
@@ -101,21 +104,45 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut game = Game { board, moves: vec![], keys: vec![], files, ended: None };
-    game.new_game(board, vec![]);
+    let mut game = Game { board, moves: vec![], keys: vec![], files, ended: None, archive: None };
     println!("Forming Strategies chess. Type 'help' for commands.");
     println!("Game files are in {}", game.files.dir().display());
+    match archive::recover(&archive_dir(game.files.dir())) {
+        Ok(closed) => {
+            for id in closed {
+                println!("Game {id} in the archive was left open when the program last stopped. GAME STOPPED was added to its end; nothing earlier changed.");
+            }
+        }
+        Err(e) => println!("Warning: could not check the archive for games left open: {e}"),
+    }
+    game.new_game(board, vec![]);
     game.run();
 }
 
 impl Game {
+    /// Start a game. Any recorded game must be closed first (see `close_archive`).
     fn new_game(&mut self, board: Board, moves: Vec<RecordedMove>) {
         self.board = board;
         self.moves = moves;
         self.keys = vec![board.position_key()];
         self.ended = None;
+        let record = ask_record();
         if let Err(e) = self.files.start_game(&board, &self.moves) {
             println!("Warning: could not write the game files: {e}");
+        }
+        self.archive = None;
+        if record {
+            match GameArchive::create(&archive_dir(self.files.dir()), &board, &self.moves) {
+                Ok(a) => {
+                    println!("Recording this game as game {} ({}).", a.id(), a.path().display());
+                    self.archive = Some(a);
+                }
+                Err(e) => {
+                    println!("Warning: could not create the archive file, so this game is not recorded: {e}");
+                }
+            }
+        } else {
+            println!("This game is not recorded. The permanent archive is not changed.");
         }
     }
 
@@ -132,28 +159,71 @@ impl Game {
         store
     }
 
-    fn game_over(&self) -> Option<String> {
+    fn outcome(&self) -> Option<Outcome> {
         let b = &self.board;
-        if let Some(text) = &self.ended {
-            return Some(text.clone());
+        if let Some(o) = &self.ended {
+            return Some(o.clone());
         }
         if b.is_checkmate() {
-            return Some(format!("Checkmate. {} wins.", b.turn().other().name()));
+            let winner = b.turn().other();
+            return Some(Outcome::win(winner, "checkmate", format!("Checkmate. {} wins.", winner.name())));
         }
         if b.is_stalemate() {
-            return Some("Stalemate. The game is drawn.".into());
+            return Some(Outcome::draw("stalemate", "Stalemate. The game is drawn.".into()));
         }
         if b.is_insufficient_material() {
-            return Some("Draw by insufficient material.".into());
+            return Some(Outcome::draw("insufficient material", "Draw by insufficient material.".into()));
         }
         if b.is_fifty_move_draw() {
-            return Some("Draw by the fifty-move rule.".into());
+            return Some(Outcome::draw("fifty-move rule", "Draw by the fifty-move rule.".into()));
         }
         let key = b.position_key();
         if self.keys.iter().filter(|k| **k == key).count() >= 3 {
-            return Some("Draw by threefold repetition.".into());
+            return Some(Outcome::draw("threefold repetition", "Draw by threefold repetition.".into()));
         }
         None
+    }
+
+    fn game_over(&self) -> Option<String> {
+        self.outcome().map(|o| o.text)
+    }
+
+    /// Close the recorded game with its result, or as stopped (15.4).
+    fn close_archive(&mut self, outcome: Option<&Outcome>, reason: &str) {
+        let Some(mut a) = self.archive.take() else { return };
+        let result = match outcome {
+            Some(o) => a.finish(o),
+            None => a.stop(reason),
+        };
+        match result {
+            Ok(()) => match outcome {
+                Some(o) => println!("Game {} is saved in the archive with its result ({}).", a.id(), o.code),
+                None => println!("Game {} is saved in the archive as stopped: {reason}.", a.id()),
+            },
+            Err(e) => println!("Warning: could not finish writing the archive file {}: {e}", a.path().display()),
+        }
+    }
+
+    /// On Y, the Step 6 search of the current position finishes before the move
+    /// is confirmed, and its progress is shown while the program waits (15.3).
+    fn wait_for_search_before_confirming(&mut self) {
+        if self.archive.is_none() {
+            return;
+        }
+        let turn = self.board.turn();
+        if self.files.search_running_for(turn) {
+            println!("This game is recorded, so the six-move future search of this position finishes before the move is confirmed.");
+            while self.files.search_running_for(turn) {
+                print!("\r  {}      ", self.files.search_status());
+                let _ = io::stdout().flush();
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            println!("\r  {}      ", self.files.search_status());
+        }
+        // Join the finished search so its file is complete on disk.
+        if self.files.stored_search(&self.board).is_none() {
+            println!("Warning: the future search of this position could not be finished, so its saved future-search file is incomplete.");
+        }
     }
 
     fn show_board(&self) {
@@ -169,8 +239,11 @@ impl Game {
     fn run(&mut self) {
         self.show_board();
         loop {
-            if let Some(over) = self.game_over() {
-                println!("\n{over} Type 'new' for a new game or 'quit' to exit.");
+            if let Some(over) = self.outcome() {
+                if self.archive.as_ref().is_some_and(|a| !a.is_closed()) {
+                    self.close_archive(Some(&over), "");
+                }
+                println!("\n{} Type 'new' for a new game or 'quit' to exit.", over.text);
             }
             let prompt = format!("\n{} — select a piece by its square (e.g. e2), or type a command: ", self.board.turn().name());
             let line = match read_line(&prompt) {
@@ -194,6 +267,7 @@ impl Game {
                 break;
             }
         }
+        self.close_archive(None, "the player quit the program");
         println!("Stopping the future search…");
         self.files.stop_workers();
         println!("Goodbye.");
@@ -292,6 +366,7 @@ impl Game {
                 options[0]
             };
             let san = self.board.san_with(&chosen, &legal);
+            self.wait_for_search_before_confirming();
             let question = format!(
                 "Move the {} from {} to {} ({san})? Confirm with Y or cancel with N: ",
                 piece.kind.name(),
@@ -339,13 +414,26 @@ impl Game {
 
     fn play(&mut self, m: Move, san: String) {
         let before = self.board;
+        let lists_past = self.files.history_moves();
         let mut record = RecordedMove::new(&before, &m);
         record.san = san.clone();
         self.board.make(&m);
         self.moves.push(record);
         self.keys.push(self.board.position_key());
-        if let Err(e) = self.files.record_turn(&before, &m, &san, &self.board) {
-            println!("Warning: could not write the game files: {e}");
+        let after = self.board;
+        let recording = self.archive.is_some();
+        // Step 15.5: copy the four working files after the history files hold
+        // this move and before the next future search starts.
+        match self.files.record_turn_then(&before, &m, &san, &after, |f| recording.then(|| WorkingFiles::read(f))) {
+            Ok(copy) => {
+                if let (Some(a), Some(copy)) = (self.archive.as_mut(), copy) {
+                    let saved = copy.and_then(|files| a.record_move(&before, &m, &san, &after, &lists_past, &files));
+                    if let Err(e) = saved {
+                        println!("Warning: could not write to the archive file: {e}");
+                    }
+                }
+            }
+            Err(e) => println!("Warning: could not write the game files: {e}"),
         }
         self.show_board();
         println!("  The future search of this position is running in the background. Type 'lists' for List 1 and List 2.");
@@ -358,6 +446,30 @@ impl Game {
         let mut parts = line.split_whitespace();
         let cmd = parts.next().unwrap_or("").to_ascii_lowercase();
         let rest: Vec<&str> = parts.collect();
+        // Commands are matched exactly, so text pasted into the game (such as
+        // "New game. All four game files were cleared.") never runs one.
+        const NO_ARGUMENTS: [&str; 18] = [
+            "help", "?", "quit", "exit", "q", "board", "b", "resign", "draw", "moves", "list3", "strategies", "files", "status",
+            "wait", "new", "fen", "presets",
+        ];
+        let side_word = |w: &str| matches!(w.to_ascii_lowercase().as_str(), "w" | "b" | "white" | "black");
+        let exact = if NO_ARGUMENTS.contains(&cmd.as_str()) {
+            rest.is_empty()
+        } else if matches!(cmd.as_str(), "lists" | "list1" | "list2" | "l" | "history") {
+            rest.len() <= 1 && rest.iter().all(|w| side_word(w))
+        } else if matches!(cmd.as_str(), "list4" | "strategy" | "preset") {
+            rest.len() <= 1
+        } else if cmd == "future" || cmd == "f" {
+            rest.len() <= 2
+        } else if cmd == "archive" {
+            rest.len() <= 2 && rest.iter().all(|w| w.parse::<u32>().is_ok())
+        } else {
+            true
+        };
+        if !exact {
+            println!("Unknown command '{}'. Type 'help' for the list, or enter a square such as e2.", line.trim());
+            return true;
+        }
         match cmd.as_str() {
             "help" | "?" => print_help(),
             "quit" | "exit" | "q" => return false,
@@ -367,7 +479,8 @@ impl Game {
                     println!("The game is already over.");
                 } else if let Input::Line(a) = read_line(&format!("{} resigns? Confirm with Y or cancel with N: ", self.board.turn().name())) {
                     if a.eq_ignore_ascii_case("y") {
-                        self.ended = Some(format!("{} resigns. {} wins.", self.board.turn().name(), self.board.turn().other().name()));
+                        let (loser, winner) = (self.board.turn(), self.board.turn().other());
+                        self.ended = Some(Outcome::win(winner, "resignation", format!("{} resigns. {} wins.", loser.name(), winner.name())));
                     }
                 }
             }
@@ -380,7 +493,7 @@ impl Game {
                     self.board.turn().other().name()
                 )) {
                     if a.eq_ignore_ascii_case("y") {
-                        self.ended = Some("Draw by agreement.".into());
+                        self.ended = Some(Outcome::draw("draw agreement", "Draw by agreement.".into()));
                     } else {
                         println!("Draw declined. The game continues.");
                     }
@@ -437,6 +550,11 @@ impl Game {
                 }
             }
             "new" => {
+                if self.keys.len() > 1 && self.game_over().is_none() && !confirm("Start a new game? This game stops here. Confirm with Y or cancel with N: ") {
+                    println!("The game continues.");
+                    return true;
+                }
+                self.close_archive(None, "the player started another game");
                 self.new_game(Board::start(), vec![]);
                 println!("New game. All four game files were cleared.");
                 self.show_board();
@@ -447,6 +565,7 @@ impl Game {
                     println!("Could not use that FEN: {} is in check but it is not {}'s turn.", b.turn().other().name(), b.turn().other().name());
                 }
                 Ok(b) => {
+                    self.close_archive(None, "the player loaded another position");
                     self.new_game(b, vec![]);
                     println!("Position loaded as a new game. All four game files were cleared.");
                     self.show_board();
@@ -461,15 +580,88 @@ impl Game {
             }
             "preset" => match rest.first().and_then(|id| preset_by_id(id)) {
                 Some(p) => {
+                    self.close_archive(None, "the player loaded a preset position");
                     self.new_game(p.board(), p.moves.clone());
                     println!("{}: {}", p.name, p.detail);
                     self.show_board();
                 }
                 None => println!("Unknown preset. Type 'presets' for the list."),
             },
+            "archive" => self.cmd_archive(&rest),
             _ => println!("Unknown command '{cmd}'. Type 'help' for the list, or enter a square such as e2."),
         }
         true
+    }
+
+    /// The permanent archive: every recorded game, one game's moves, or one move.
+    fn cmd_archive(&mut self, rest: &[&str]) {
+        let dir = archive_dir(self.files.dir());
+        let current = self.archive.as_ref().map(|a| a.id());
+        let nums: Vec<u32> = rest.iter().filter_map(|w| w.parse().ok()).collect();
+        let games = archive::read_archive(&dir);
+        match nums.as_slice() {
+            [] => {
+                println!("Permanent AI learning archive: {} recorded game{} in {}", games.len(), if games.len() == 1 { "" } else { "s" }, dir.display());
+                for g in &games {
+                    let status = match &g.status {
+                        _ if Some(g.id) == current => "being recorded now".to_string(),
+                        GameStatus::Finished { result_code, termination, .. } => {
+                            format!("GAME END {result_code}{}", if termination.is_empty() { String::new() } else { format!(" ({termination})") })
+                        }
+                        GameStatus::Stopped { reason } => format!("GAME STOPPED ({reason})"),
+                        GameStatus::Open => "open".to_string(),
+                    };
+                    println!("  game {:<4} format {}  {:<45} {} saved move{}", g.id, g.format, status, g.moves.len(), if g.moves.len() == 1 { "" } else { "s" });
+                }
+                let all = archive::memories(&dir, false).len();
+                let limited = archive::memories(&dir, true).len();
+                let general = archive::bank(&dir, "general").len();
+                println!("Memory list: {all} saved moves from games with an end block; a limited read returns {limited} (limit {MEMORY_LIMIT}). General bank: {general} references.");
+                println!("Saving is not training: no neural network has been trained, so no AI advice is shown beside Lists 1 and 3.");
+                println!("Type 'archive <game>' for its moves, or 'archive <game> <ply>' for one saved move.");
+            }
+            [id] => match games.iter().find(|g| g.id == *id) {
+                Some(g) => {
+                    println!("Game {} ({}):", g.id, g.path.display());
+                    for m in &g.moves {
+                        let parts = if g.format >= 3 {
+                            format!("past, present and future saved ({} working files, {} list lines)", m.files.files.len(), m.lists.len())
+                        } else {
+                            "format 1: summary only".to_string()
+                        };
+                        println!("  ply {:<4} {:<6} {:<8} {}", m.ply, m.side.name(), m.san, parts);
+                    }
+                    if g.moves.is_empty() {
+                        println!("  No moves were played.");
+                    }
+                }
+                None => println!("There is no archived game {id}."),
+            },
+            [id, ply, ..] => match games.iter().find(|g| g.id == *id).and_then(|g| g.moves.iter().find(|m| m.ply == *ply).map(|m| (g, m))) {
+                Some((g, m)) => {
+                    println!("Game {} ply {}: {} {} ({})", g.id, m.ply, m.side.name(), m.san, m.uci);
+                    println!("fen_before: {}\nfen_after:  {}", m.fen_before, m.fen_after);
+                    for (name, bytes) in &m.files.files {
+                        let text = String::from_utf8_lossy(bytes);
+                        if name.ends_with("_history.txt") {
+                            println!("\n----- {name} ({} bytes, saved unchanged) -----\n{text}", bytes.len());
+                        } else {
+                            let lines = text.lines().count();
+                            println!("\n----- {name} ({} bytes, {lines} lines, saved unchanged; first 16 lines) -----", bytes.len());
+                            for l in text.lines().take(16) {
+                                println!("{l}");
+                            }
+                        }
+                    }
+                    println!("\n----- Lists saved with this move ({} lines) -----", m.lists.len());
+                    for l in &m.lists {
+                        println!("{l}");
+                    }
+                    println!("\nThe whole record is in {}.", g.path.display());
+                }
+                None => println!("Game {id} has no saved move {ply}."),
+            },
+        }
     }
 
     fn cmd_list3(&mut self) {
@@ -594,9 +786,32 @@ Files (Steps 4–7)
   history [w|b]   print a history file
   wait            wait for the six-move future search to finish
   status          progress of the two future searches
+Archive
+  archive         every recorded game; 'archive <game>' lists its moves;
+                  'archive <game> <ply>' shows one saved move
 Other
   resign, draw (offer a draw), board, moves, fen, load <fen>, presets, preset <id>, new, quit"
     );
+}
+
+/// Y or N; end of input counts as N.
+fn confirm(prompt: &str) -> bool {
+    loop {
+        match read_line(prompt) {
+            Input::Eof => return false,
+            Input::Line(a) => match a.to_ascii_uppercase().as_str() {
+                "Y" => return true,
+                "N" => return false,
+                _ => println!("Please enter Y or N."),
+            },
+        }
+    }
+}
+
+/// The question at the start of every game (rules, permanent archive A).
+fn ask_record() -> bool {
+    println!("\n{RECORD_QUESTION}");
+    confirm("Y or N: ")
 }
 
 fn print_list1(e: &Evaluation, title: &str) {

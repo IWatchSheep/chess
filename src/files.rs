@@ -132,6 +132,15 @@ impl GameFiles {
     /// Steps 4 and 5: record a confirmed move, then refresh the future-search
     /// file of the player who is now to move.
     pub fn record_turn(&mut self, before: &Board, m: &Move, san: &str, after: &Board) -> io::Result<()> {
+        self.record_turn_then(before, m, san, after, |_| ())
+    }
+
+    /// The same as [`record_turn`](Self::record_turn), and `between` runs after
+    /// the two history files are written and before the future search of the
+    /// new position starts. At that moment the four files hold the past, the
+    /// present (the move just made) and the finished future search of the
+    /// position where the player decided. Step 15 copies them then.
+    pub fn record_turn_then<T>(&mut self, before: &Board, m: &Move, san: &str, after: &Board, between: impl FnOnce(&GameFiles) -> T) -> io::Result<T> {
         let mut mv = RecordedMove::without_san(m);
         mv.san = san.to_string();
         let record = TurnRecord {
@@ -156,7 +165,9 @@ impl GameFiles {
         }
         self.write_history(m.color, true)?;
         self.write_history(m.color.other(), false)?;
-        self.start_future_search(after)
+        let result = between(self);
+        self.start_future_search(after)?;
+        Ok(result)
     }
 
     pub fn history(&self, color: Color) -> &VecDeque<TurnRecord> {
@@ -320,7 +331,7 @@ impl Drop for GameFiles {
 
 // ----- RECORD lines (the past) -------------------------------------------------
 
-fn record_line(m: &RecordedMove) -> String {
+pub fn record_line(m: &RecordedMove) -> String {
     let letter = |k: Option<PieceKind>| k.map(|k| k.letter().to_string()).unwrap_or_else(|| "-".into());
     format!(
         "RECORD {} {} {} {} {} {} {} {}",
@@ -335,7 +346,7 @@ fn record_line(m: &RecordedMove) -> String {
     )
 }
 
-fn parse_record_line(line: &str) -> Option<RecordedMove> {
+pub fn parse_record_line(line: &str) -> Option<RecordedMove> {
     let rest = line.strip_prefix("RECORD ")?;
     let p: Vec<&str> = rest.split_whitespace().collect();
     if p.len() != 8 {

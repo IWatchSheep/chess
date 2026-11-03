@@ -378,7 +378,50 @@ impl Default for Board {
     }
 }
 
+/// A position without its move clocks: pieces, side to move, castling rights
+/// and en-passant square. Legal moves, and every reading of the 19 strategies
+/// that do not look at the move history, are the same for two boards with the
+/// same key (no strategy reads the halfmove or fullmove counters).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BoardKey {
+    by_kind: [u64; 6],
+    by_color: [u64; 2],
+    turn: Color,
+    castling: u8,
+    ep: Option<Square>,
+}
+
 impl Board {
+    pub fn key(&self) -> BoardKey {
+        BoardKey { by_kind: self.by_kind, by_color: self.by_color, turn: self.turn, castling: self.castling, ep: self.ep }
+    }
+
+    /// The same information as [`key`](Self::key) in 32 bytes: the occupied
+    /// squares, then one 4-bit code (color and kind) per piece in square order,
+    /// then side to move, castling rights and en-passant square. Two boards have
+    /// the same packed key exactly when they have the same `key`. `None` for a
+    /// board with more than 32 pieces (no legal game has one).
+    pub fn packed_key(&self) -> Option<[u64; 4]> {
+        let occupied = self.by_color[0] | self.by_color[1];
+        if occupied.count_ones() > 32 {
+            return None;
+        }
+        let mut codes = [0u64; 2];
+        let mut bits = occupied;
+        let mut n = 0;
+        while bits != 0 {
+            let sq = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let p = self.squares[sq].expect("occupied square has a piece");
+            let code = (p.color.index() as u64) << 3 | (p.kind.index() as u64 + 1);
+            codes[n / 16] |= code << (4 * (n % 16));
+            n += 1;
+        }
+        let ep = self.ep.map(|s| s as u64 + 1).unwrap_or(0);
+        let tail = (self.turn.index() as u64) | (self.castling as u64) << 1 | ep << 9;
+        Some([occupied, codes[0], codes[1], tail])
+    }
+
     fn empty() -> Board {
         Board {
             by_kind: [0; 6],

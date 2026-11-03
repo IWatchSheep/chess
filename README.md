@@ -56,7 +56,7 @@ Command-line options: `--dir <folder>` puts the files somewhere else (the defaul
 
 All four files are cleared when a new game starts (`new`, `load`, `preset`). History files are rewritten after every confirmed move.
 
-The future search runs in the background on all CPU cores, so the game never waits for it. From the start position it is 124,132,536 nodes and takes about 1–4 seconds. Middlegame positions can be 10–50 times larger. If a newer position arrives for the same player, the old search is cancelled.
+The future search runs in the background on all CPU cores, so play can continue while it runs. From the start position it is 124,132,536 nodes, with the strategies read through all six moves (see Reading depth below). If a newer position arrives for the same player, the old search is cancelled. In a recorded game the search is always finished before the move is confirmed, so nothing is cancelled.
 
 Each future file records three things:
 
@@ -65,6 +65,34 @@ Each future file records three things:
 - every sequence of up to three moves, one per line
 
 All six depths are fully searched. Only the line-by-line listing stops at three moves: at six moves it would be over 100 million lines (several GB) per file, every turn. The counts show that the full search ran. `LISTED_PLIES` in `src/search.rs` controls the listing depth.
+
+## Step 15: the permanent AI learning archive
+
+At startup, and on `new`, `load` and `preset`, the program asks:
+
+```
+Save this game's information to the permanent AI learning files?
+Y — Yes
+N — No
+```
+
+**N** plays normally and changes no saved byte. **Y** records the game in one file, `game_files/ai_learning/game_<id>.txt`, holding both White and Black. The file is only ever appended to, and earlier games are never touched.
+
+- **Before each move is confirmed** in a recorded game, the six-move future search of the position finishes. Its progress is shown while the program waits.
+- **Every confirmed move** appends one `MOVE` record with the ply, move number, side and `RECORD` line. The record holds the **four working files copied whole and unchanged**, byte for byte, at the moment the move was recorded:
+  - **Past:** the previous turns in both history files.
+  - **Present:** the move just played, in the history file of the side that moved.
+  - **Future:** the finished six-move future-search file of the position where that side decided.
+- **The official lists** are saved with the move: List 1 for both sides, List 2, List 3 for every legal candidate (the played one marked `PLAYED`, every line labelled `searched`) and List 4 for every reply.
+- **The game ends** with `GAME END` (result code 1-0, 0-1 or 1/2-1/2, plus how it ended) or `GAME STOPPED` (the player quit or started another game). If the program is killed, the next start appends `GAME STOPPED` to that file and changes no earlier byte.
+- **Memory list:** `ai_learning/memory_index.txt` has one line per saved move (game id and ply), in recording order, for games that have an end block. A limited read returns at most 50 memories, and nothing is ever deleted. The list can be deleted and rebuilt from the archive files.
+- **General memory bank:** `ai_learning/banks/general.txt` holds references to every saved move of every ended game.
+- **Size:** each move stores the whole future-search files, so a recorded game takes several hundred KB per move.
+- **Saving is not training.** No neural network is trained yet. Lists 1–4 are made from the working files exactly as before, whether the game is recorded or not.
+
+Commands: `archive` lists every recorded game and the memory list. `archive <game>` lists the game's saved moves. `archive <game> <ply>` shows one saved move.
+
+Commands are matched exactly, so pasted text such as `New game. All four game files were cleared.` runs nothing. `new` asks before stopping a game in progress.
 
 ## How it is organized
 
@@ -79,6 +107,7 @@ All six depths are fully searched. Only the line-by-line listing stops at three 
 | `src/presets.rs` | `presets.ts` | reference positions |
 | `src/search.rs` | new | six-move search (Step 6) |
 | `src/files.rs` | new | the four files (Steps 4–7) |
+| `src/archive.rs` | new | the permanent AI learning archive |
 | `src/main.rs` | new | console game (Steps 1–3) |
 
 ## Tests
@@ -88,6 +117,16 @@ All six depths are fully searched. Only the line-by-line listing stops at three 
 - **The ported TypeScript tests**: starting-position scores, one fully developed position for each of the 20 strategies, and all eight capture examples from Step 14.3.
 - **Move-generator checks** against the published counts, including the start-position numbers from Step 6.
 - **The stored search and files** (`tests/stored.rs`): Lists 1–4 read from the future and history files give the same rows as the small in-memory reader, the evidence survives a round trip through the file, and the search counts 124,132,536 nodes from the start. The middlegame cases take about a minute.
+- **Step 15** (`tests/archive.rs`), the tests listed in rule 15.10:
+  - Saved files match the working files byte for byte, with every piece shown before and after.
+  - Each saved future is the finished six-move file; from the start it counts 124,132,536 nodes with strategies read to move 5 and 6.
+  - A long game keeps its opening, and the saved lists are the official ones.
+  - N changes no byte, and games accumulate.
+  - A killed game gets `GAME STOPPED`.
+  - The memory list, the limit of 50 and the general bank work, and rebuilding gives the same result.
+  - Format-1 files still read.
+- **Exact speed-ups** (`tests/search_exact.rs`, `tests/fast_paths.rs`).
+- **Running time.** With six-move reading, `tests/stored.rs` and the start-position archive test run full searches from the start and from middlegame positions. They take hours on most machines.
 
 ## Differences from the TypeScript version
 
@@ -114,15 +153,16 @@ While the search walks the tree, it reads the 20 strategies for both players on 
 
 ### Reading depth (`READ_PLIES` in `src/search.rs`)
 
-All six individual moves are searched and counted: 124,132,536 nodes from the start. Strategies are read on the positions up to individual move **4**. Reading them on moves 5 and 6 as well was built and measured, and it is too slow to play with:
+All six individual moves are searched and counted: 124,132,536 nodes from the start. **The 20 strategies are read for both players on every position through all six moves** (rules 15.1 and 15.10). Two exact speed-ups make this practical without changing any result:
 
-| Strategy reading depth | From the start position (12 threads, release) |
-|---|---|
-| 4 (default) | about 5 s |
-| 5 | about 93 s |
-| 6 | more than 10 minutes (about 119 million positions read for both players) |
+- **Skipping readings that can't change anything.** A strategy is read on a position only when a stored position above it doesn't yet know that strategy's earliest progress or completion at that depth.
+- **Reading each distinct position once.** The 19 strategies that look only at the board are read once per distinct position and reused when move orders transpose. Central pawn break's completion reads the history window, so it is checked on every line.
 
-A middlegame has 20 to 50 times more positions, and the search is redone after every move. Set `READ_PLIES` to 5 or 6 if you want the deeper horizon and can wait. Nothing else changes.
+Strategies also read faster now, with the same results: attacks are tested directly, the search asks only for the three flags, and Promotion only looks for promoting moves when a pawn is on the seventh rank.
+
+`tests/search_exact.rs` proves the stored evidence equals reading every strategy on every position (`full_search_reference`). `tests/fast_paths.rs` proves the faster readings give the same answers as the originals.
+
+**Expect long searches.** On a 2-core machine the start-position search takes about 10 minutes, about 5 minutes on 12 threads. Middlegame positions have about 1–1.5 billion sequences (8–12 times the start), so a middlegame search can take most of an hour. A recorded game waits for it before each move. The shared position cache uses up to about 1 GB of memory.
 
 ## Which rules this follows
 
