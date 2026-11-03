@@ -20,7 +20,7 @@
 //! (`ai_learning/banks/general.txt`). Saving these copies is not training.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -159,7 +159,7 @@ pub struct GameArchive {
     id: u32,
     dir: PathBuf,
     path: PathBuf,
-    file: File,
+    file: BufWriter<File>,
     plies: u32,
     closed: bool,
 }
@@ -172,7 +172,7 @@ impl GameArchive {
         let (path, file) = loop {
             let path = dir.join(format!("game_{id}.txt"));
             match OpenOptions::new().append(true).create_new(true).open(&path) {
-                Ok(f) => break (path, f),
+                Ok(f) => break (path, BufWriter::with_capacity(crate::fastio::WRITE_BUFFER, f)),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => id += 1,
                 Err(e) => return Err(e),
             }
@@ -216,7 +216,7 @@ impl GameArchive {
     fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.file.write_all(bytes)?;
         self.file.flush()?;
-        self.file.sync_data()
+        self.file.get_ref().sync_data()
     }
 
     /// Append the record of one confirmed move (15.5).
@@ -681,7 +681,10 @@ fn legacy_code(text: &str) -> String {
 
 /// Read one archive file (format 1 or 3).
 pub fn read_game(path: &Path) -> io::Result<ArchivedGame> {
-    let bytes = fs::read(path)?;
+    // The archive holds every move's future-search file. Mapping it avoids a
+    // second copy of that text before the move records are split out.
+    let mapped = crate::fastio::map_file(path)?;
+    let bytes = mapped.as_slice();
     let mut g = ArchivedGame {
         id: game_id_of(path).unwrap_or(0),
         path: path.to_path_buf(),
@@ -763,33 +766,39 @@ pub fn read_archive(dir: &Path) -> Vec<ArchivedGame> {
 pub fn recover(dir: &Path) -> io::Result<Vec<u32>> {
     let mut closed = Vec::new();
     for (id, path) in archive_files(dir) {
-        let bytes = fs::read(&path)?;
-        if !blocks(&bytes)
-            .iter()
-            .any(|b| b.first == "GAME END" || b.first == "GAME STOPPED")
-        {
-            let plies = blocks(&bytes)
-                .iter()
-                .filter(|b| b.first.starts_with("MOVE "))
-                .count() as u32;
-            let mut f = OpenOptions::new().append(true).open(&path)?;
-            let mut t = String::new();
-            if !bytes.ends_with(b"\n") {
-                t.push('\n');
+        let mapped = crate::fastio::map_file(&path)?;
+        let needs_nl = !mapped.as_slice().ends_with(b"\n");
+        let parsed = blocks(mapped.as_slice());
+        drop(mapped);
+        if !parsed.iter().any(|b| b.first == "GAME END" || b.first == "GAME STOPPED") {
+            let plies = parsed.iter().filter(|b| b.first.starts_with("MOVE ")).count() as u32;
+            let file = OpenOptions::new().append(true).open(&path)?;
+            let mut w = BufWriter::new(file);
+            if needs_nl {
+                w.write_all(b"\n")?;
             }
-            t.push_str(&stop_block(
-                "the program was stopped before the game ended (found at the next start)",
-                plies,
-            ));
-            f.write_all(t.as_bytes())?;
-            f.sync_data()?;
+            w.write_all(
+                stop_block(
+                    "the program was stopped before the game ended (found at the next start)",
+                    plies,
+                )
+                .as_bytes(),
+            )?;
+            w.flush()?;
+            w.get_ref().sync_data()?;
             closed.push(id);
         }
     }
     // Rebuild when a game was closed here, or when the list or the general bank
     // is missing or was written by an earlier version in another layout.
-    let ours =
-        |path: PathBuf, header: &str| fs::read_to_string(path).is_ok_and(|t| t.starts_with(header));
+    let ours = |path: PathBuf, header: &str| -> bool {
+        let Ok(file) = File::open(path) else { return false };
+        let mut buf = vec![0u8; header.len()];
+        match BufReader::new(file).read_exact(&mut buf) {
+            Ok(()) => buf == header.as_bytes(),
+            Err(_) => false,
+        }
+    };
     let current = ours(dir.join(MEMORY_INDEX), INDEX_HEADER)
         && ours(dir.join(BANKS_FOLDER).join(GENERAL_BANK), BANK_HEADER);
     if !closed.is_empty() || (!archive_files(dir).is_empty() && !current) {
@@ -839,7 +848,8 @@ const BANK_HEADER: &str = "# General memory bank (Step 15.9): references to ever
 
 fn append_lines(path: &Path, header: &str, lines: &[String]) -> io::Result<()> {
     let new = !path.exists();
-    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = BufWriter::with_capacity(crate::fastio::WRITE_BUFFER, file);
     if new {
         f.write_all(header.as_bytes())?;
     }
@@ -847,7 +857,8 @@ fn append_lines(path: &Path, header: &str, lines: &[String]) -> io::Result<()> {
         f.write_all(l.as_bytes())?;
         f.write_all(b"\n")?;
     }
-    f.sync_data()
+    f.flush()?;
+    f.get_ref().sync_data()
 }
 
 fn add_to_memory(dir: &Path, game_path: &Path) -> io::Result<()> {
@@ -879,9 +890,9 @@ pub fn rebuild_memory(dir: &Path) -> io::Result<()> {
             index.push('\n');
         }
     }
-    fs::write(dir.join(MEMORY_INDEX), index)?;
+    crate::fastio::write_buffered(&dir.join(MEMORY_INDEX), index.as_bytes())?;
     fs::create_dir_all(dir.join(BANKS_FOLDER))?;
-    fs::write(dir.join(BANKS_FOLDER).join(GENERAL_BANK), bank)
+    crate::fastio::write_buffered(&dir.join(BANKS_FOLDER).join(GENERAL_BANK), bank.as_bytes())
 }
 
 fn parse_ref(line: &str) -> Option<Memory> {
@@ -895,24 +906,31 @@ fn parse_ref(line: &str) -> Option<Memory> {
 /// The memory list in its stored order. With `limited`, at most
 /// [`MEMORY_LIMIT`] memories are returned; nothing is ever deleted.
 pub fn memories(dir: &Path, limited: bool) -> Vec<Memory> {
-    let text = fs::read_to_string(dir.join(MEMORY_INDEX)).unwrap_or_default();
-    let all = text
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(parse_ref);
-    if limited {
-        all.take(MEMORY_LIMIT).collect()
-    } else {
-        all.collect()
-    }
+    read_memory_lines(&dir.join(MEMORY_INDEX), limited)
 }
 
 /// The references in a memory bank (`general` for the general bank).
 pub fn bank(dir: &Path, name: &str) -> Vec<Memory> {
-    let text =
-        fs::read_to_string(dir.join(BANKS_FOLDER).join(format!("{name}.txt"))).unwrap_or_default();
-    text.lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(parse_ref)
-        .collect()
+    read_memory_lines(&dir.join(BANKS_FOLDER).join(format!("{name}.txt")), false)
+}
+
+/// Read memory references through a buffered reader. A limited read stops after
+/// [`MEMORY_LIMIT`] lines, so a long index is not loaded whole.
+fn read_memory_lines(path: &Path, limited: bool) -> Vec<Memory> {
+    let Ok(file) = File::open(path) else { return Vec::new() };
+    let reader = BufReader::with_capacity(64 * 1024, file);
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(memory) = parse_ref(&line) {
+            out.push(memory);
+            if limited && out.len() == MEMORY_LIMIT {
+                break;
+            }
+        }
+    }
+    out
 }

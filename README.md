@@ -5,6 +5,8 @@ A console chess program that identifies the chess strategies forming for each pl
 ## Contents
 
 - [Getting started](#getting-started)
+  - [Requirements](#requirements) · [RustRover](#open-it-in-rustrover) · [Terminal](#build-and-run-from-a-terminal) · [In-game commands](#commands-during-a-game) · [Tests](#tests)
+  - [Source code](#how-the-source-code-is-organized) · [Performance notes](#performance-notes) · [Which rules this follows](#which-rules-this-follows)
 - [Playing a move (Steps 1–3)](#playing-a-move-steps-13)
 - [The four working files (Steps 4–7)](#the-four-working-files-steps-47)
 - [The four lists (Steps 8–13)](#the-four-lists-steps-813)
@@ -86,6 +88,7 @@ The first command runs the normal tests. The second runs the full six-move searc
 | `src/presets.rs` | Reference positions: one fully developed position for each of the 20 strategies |
 | `src/search.rs` | The six-move future search (Step 6) |
 | `src/files.rs` | The four working files (Steps 4–7) |
+| `src/fastio.rs` | Buffered writes, memory-mapped reads, and the binary evidence cache |
 | `src/archive.rs` | The permanent AI learning archive (Step 15) |
 | `examples/bench_search.rs` | Times the six-move search on a position |
 | `rules/` | The written rules (`rules.txt`) and the user's notes |
@@ -100,6 +103,7 @@ The first command runs the normal tests. The second runs the full six-move searc
 | `tests/search_exact.rs` | The stored search evidence equals reading every strategy on every position |
 | `tests/fast_paths.rs` | The faster strategy readings give the same answers as the originals |
 | `tests/archive.rs` | The Step 15 archive tests listed in rule 15.10 |
+| `tests/file_speed.rs` | Buffered, memory-mapped and binary-cache reads. Does not run the six-move search |
 
 ### Performance notes
 
@@ -119,6 +123,34 @@ The search settings are constants at the top of `src/search.rs`:
   - `tests/search_exact.rs` and `tests/fast_paths.rs` prove both speed-ups give the same answers.
 - **Memory:** the shared position cache holds up to 8 million positions (`CACHE_LIMIT` in `src/search.rs`) in 64 shards. A full shard is emptied and refilled.
 - **Expect long searches.** The start position has 124,132,536 nodes. Middlegame positions usually have many more sequences, so their searches take much longer. Lists 1–4 (`lists`, `list3`, `future`, `list4`) wait for the current position's search to finish.
+
+#### Faster file reading
+
+[Step 6](#step-6--three-full-turns-into-the-future) keeps performance work separate from the search: the depth stays six moves and no legal sequence is dropped. [Step 15.5](#155-what-is-saved-at-each-move) keeps the four working files as text, copied whole, with no new format. Binary formats such as Protocol Buffers, FlatBuffers or MessagePack would throw that text away, so the files stay text. Only the way the bytes are moved has changed. The code is in `src/fastio.rs`.
+
+| Technique | What it does |
+|---|---|
+| Buffered writes | History files, future-search files and archive appends go through a 256 KiB buffered writer. |
+| Safe replacement | A future file is written to a temporary file and renamed into place, so nothing reads a half-written search. |
+| Buffered reads | History `RECORD` lines and the memory list are read with a buffered reader. A limited memory read stops after 50 lines (rule 15.8) and deletes nothing. |
+| Memory-mapped files (Unix) | The future-search file and each archive are mapped into the process. Lists 1–4 parse the strategy evidence from the mapping, without first copying the sequence listing into one big string. |
+| Windows | No `mmap`. The same bytes are read through a buffered reader, then go through the same parser and evidence cache. |
+| Binary evidence cache | See below. |
+
+**The binary evidence cache**
+
+- Next to `white_future.txt` the program may write `white_future.txt.evidence`, a compact copy of the strategy evidence the lists read.
+- The cache stores a hash of the text file's bytes and is used only while that hash still matches. Length and modification time alone are not trusted, so a same-size edit is never served from an old cache.
+- On a mismatch, the program parses the text and rewrites the cache.
+- On a cache hit, the sequence listing is not parsed line by line.
+- The cache is not one of the four working files and is not stored in the archive.
+- `*.evidence` files are listed in `.gitignore`, so they are never committed.
+
+### Which rules this follows
+
+`rules/rules.txt` is the specification this README follows.
+
+The earlier note in `rules/users note about archive file handling.txt` said memories past the cap are dropped, and that this program sorts useful memories to the front. [Rule 15.8](#158-memory-list-and-limit) keeps every memory and leaves that sorting to a trained network. The program follows rule 15.8.
 
 ---
 

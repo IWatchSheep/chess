@@ -544,7 +544,7 @@ impl Game {
             }
             "history" => {
                 let side = rest.first().and_then(|s| s.chars().next()).and_then(Color::from_letter).unwrap_or(self.board.turn().other());
-                match std::fs::read_to_string(self.files.history_path(side)) {
+                match chess::fastio::read_to_string_buffered(&self.files.history_path(side)) {
                     Ok(t) => println!("{t}"),
                     Err(e) => println!("Could not read the file: {e}"),
                 }

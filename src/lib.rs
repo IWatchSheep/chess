@@ -9,12 +9,14 @@
 //! * `presets`    – reference positions, one per strategy
 //! * `search`     – the three-full-turn (six-ply) future search (Step 6)
 //! * `files`      – history and future-search files (Steps 4, 5, 7)
+//! * `fastio`     – buffered, memory-mapped, and binary-cached reads of those files
 //! * `archive`    – the permanent AI learning archive of recorded games
 
 pub mod archive;
 pub mod board;
 pub mod evaluate;
 pub mod exchange;
+pub mod fastio;
 pub mod files;
 pub mod geometry;
 pub mod position;

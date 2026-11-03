@@ -12,16 +12,21 @@
 //! All four files are cleared at the start of every game. History files are
 //! rewritten after every confirmed move. Future-search files are rebuilt in a
 //! background thread so the game never waits for the search.
+//!
+//! Reading and writing go through [`crate::fastio`]: buffered writers, a
+//! memory map for the future file, and a binary cache of the strategy evidence.
+//! The text of the four files is unchanged (Steps 6 and 15.5).
 
 use std::collections::VecDeque;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crate::board::{parse_square, square_name, Board, Color, Move, PieceKind};
+use crate::fastio;
 use crate::position::RecordedMove;
 use crate::search::{full_search, mover_at, thousands, FutureStore, Progress, SearchReport, LISTED_PLIES, SEARCH_PLIES};
 
@@ -114,15 +119,18 @@ impl GameFiles {
             let just_moved = color != board.turn() && !self.history[color.index()].is_empty();
             self.write_history(color, just_moved)?;
             if color != board.turn() {
-                fs::write(
-                    self.future_path(color),
+                let path = self.future_path(color);
+                fastio::remove_evidence_cache(&path);
+                fastio::write_buffered(
+                    &path,
                     format!(
                         "{}\n\nWaiting: {} is not the next player to move in this position.\n\
                          This file fills in after {}'s next move.\n",
                         future_title(color),
                         color.name(),
                         color.other().name()
-                    ),
+                    )
+                    .as_bytes(),
                 )?;
             }
         }
@@ -217,7 +225,7 @@ impl GameFiles {
                 rec.after
             ));
         }
-        fs::write(self.history_path(color), text)
+        fastio::write_buffered(&self.history_path(color), text.as_bytes())
     }
 
     /// The past: every move recorded in the two history files, read back from disk.
@@ -226,8 +234,15 @@ impl GameFiles {
     pub fn history_moves(&self) -> Vec<RecordedMove> {
         let mut out = Vec::new();
         for color in Color::BOTH {
-            if let Ok(text) = fs::read_to_string(self.history_path(color)) {
-                out.extend(text.lines().filter_map(parse_record_line));
+            let Ok(file) = File::open(self.history_path(color)) else { continue };
+            // History files are line oriented. A buffered reader pulls RECORD
+            // lines without a second copy of the legal-move listings.
+            let reader = BufReader::with_capacity(64 * 1024, file);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if let Some(mv) = parse_record_line(&line) {
+                    out.push(mv);
+                }
             }
         }
         out
@@ -240,13 +255,16 @@ impl GameFiles {
             old.stop();
         }
         let path = self.future_path(color);
-        fs::write(
+        // Drop any cache of the previous file before the placeholder replaces it.
+        fastio::remove_evidence_cache(&path);
+        fastio::write_buffered(
             &path,
             format!(
                 "{}\n\nPosition: {}\nStatus: searching all legal sequences to six individual moves…\n",
                 future_title(color),
                 board.fen()
-            ),
+            )
+            .as_bytes(),
         )?;
         let moves = self.history_moves();
         let progress = Arc::new(Progress::default());
@@ -254,7 +272,12 @@ impl GameFiles {
         let board = *board;
         let handle = std::thread::spawn(move || {
             if let Some(report) = full_search(&board, &moves, &shared) {
-                let _ = fs::write(&path, future_text(color, &report));
+                // The text file is still the record. The binary cache is written
+                // only after that text is in place, and it stores the same evidence.
+                let wrote = fastio::write_buffered_with(&path, |w| write_future(w, color, &report));
+                if wrote.is_ok() {
+                    let _ = fastio::write_evidence_cache(&path, &report.store.to_evidence_bytes());
+                }
             }
         });
         self.workers[color.index()] = Some(Worker { progress, handle: Some(handle) });
@@ -272,8 +295,21 @@ impl GameFiles {
                 let _ = h.join();
             }
         }
-        let text = fs::read_to_string(self.future_path(color)).ok()?;
-        FutureStore::from_text(&text).filter(|s| s.fen == board.fen())
+        let path = self.future_path(color);
+        // One read of the text (a memory map on Unix, a buffered read on
+        // Windows). The cache is accepted only when its hash is of these bytes.
+        let mapped = fastio::map_file(&path).ok()?;
+        if let Some(store) = cached_store(&path, mapped.as_slice()) {
+            if store.fen == board.fen() {
+                return Some(store);
+            }
+        }
+        let store = FutureStore::from_bytes(mapped.as_slice())?;
+        if store.fen != board.fen() {
+            return None;
+        }
+        let _ = fastio::write_evidence_cache(&path, &store.to_evidence_bytes());
+        Some(store)
     }
 
     /// True while the search for the side to move is still running.
@@ -384,59 +420,70 @@ fn future_title(color: Color) -> String {
     )
 }
 
-fn future_text(color: Color, r: &SearchReport) -> String {
-    let mut t = future_title(color);
-    t.push_str(&format!(
-        "\n\nPosition: {}\nStatus: complete in {:.2} s on {} thread(s)\n\nSequences by depth:\n",
+fn cached_store(path: &Path, text: &[u8]) -> Option<FutureStore> {
+    let payload = fastio::read_evidence_cache(path, text).ok()??;
+    FutureStore::from_evidence_bytes(&payload)
+}
+
+/// The future-search file, streamed through a buffered writer. The bytes are
+/// the same text [`FutureStore::from_text`] reads back.
+fn write_future(w: &mut impl Write, color: Color, r: &SearchReport) -> io::Result<()> {
+    write!(
+        w,
+        "{}\n\nPosition: {}\nStatus: complete in {:.2} s on {} thread(s)\n\nSequences by depth:\n",
+        future_title(color),
         r.fen,
         r.elapsed.as_secs_f64(),
         r.threads
-    ));
+    )?;
     for d in 0..SEARCH_PLIES {
-        t.push_str(&format!(
+        write!(
+            w,
             "  Individual move {} ({}): {:>15} possible sequences\n",
             d + 1,
             mover_at(r.to_move, d).name(),
             thousands(r.counts[d])
-        ));
+        )?;
     }
-    t.push_str(&format!("  Total search nodes: {}\n", thousands(r.total_nodes())));
+    write!(w, "  Total search nodes: {}\n", thousands(r.total_nodes()))?;
 
-    t.push_str("\nSequences by first move (counts at individual moves 1–6):\n");
+    write!(w, "\nSequences by first move (counts at individual moves 1–6):\n")?;
     for root in &r.roots {
         let cells: Vec<String> = root.counts.iter().map(|&c| thousands(c)).collect();
-        t.push_str(&format!("  {:<8} {}\n", root.san, cells.join(" / ")));
+        write!(w, "  {:<8} {}\n", root.san, cells.join(" / "))?;
     }
     if r.roots.is_empty() {
-        t.push_str("  (no legal moves: the game is over in this position)\n");
+        write!(w, "  (no legal moves: the game is over in this position)\n")?;
     }
 
-    t.push_str(&format!(
+    write!(
+        w,
         "\nEvery sequence of up to {LISTED_PLIES} individual moves ({} lines).\n\
          Deeper sequences are counted above but not listed one per line: at six moves that\n\
          would be {} lines here.\n\n",
         thousands(r.lines.len() as u64),
         thousands(r.counts[SEARCH_PLIES - 1])
-    ));
+    )?;
     for line in &r.lines {
-        t.push_str(line);
-        t.push('\n');
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
     }
 
-    t.push_str(
+    write!(
+        w,
         "\n\nSTORED STRATEGY EVIDENCE (read by List 1, List 3 and List 4)\n\
          One line for the searched position, for each position after one move, and for each position\n\
          after a move and a reply (UCI moves). Each line holds four rows of 20 digits, one digit per\n\
          strategy 1-20: White progress-or-completion, White completion, Black progress-or-completion,\n\
          Black completion. A digit is the earliest individual move, counted from that\n\
          position, at which it appears on some legal line of the six-move search. 0 means never.\n\
-         The development score reads digits 1 and 2 (one full turn). The rest is the horizon.\n",
-    );
+         The development score reads digits 1 and 2 (one full turn). The rest is the horizon.\n"
+    )?;
     for line in r.store.to_lines() {
-        t.push_str(&line);
-        t.push('\n');
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
     }
-    t
+    Ok(())
 }
 
 /// Every piece on the board with its available legal moves (Step 4).
@@ -474,5 +521,48 @@ fn capitalize(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::write_future;
+    use crate::board::Color;
+    use crate::search::{Evidence, FutureStore, RootLine, SearchReport, SEARCH_PLIES};
+
+    /// Writes a tiny future file and reads it back. This does not run the six-move search.
+    #[test]
+    fn streamed_future_file_round_trips_the_evidence() {
+        let fen = "8/8/8/8/8/8/4P3/4K2k w - - 0 1".to_string();
+        let mut store = FutureStore { fen: fen.clone(), entries: Default::default() };
+        let mut root = Evidence::default();
+        root.first[0][0][0] = 1;
+        store.entries.insert(String::new(), root);
+        let mut reply = Evidence::default();
+        reply.first[1][1][4] = 6;
+        store.entries.insert("e2e4 e7e5".into(), reply);
+        let report = SearchReport {
+            fen: fen.clone(),
+            to_move: Color::White,
+            counts: [20, 400, 8_902, 197_281, 4_865_609, 119_060_324],
+            roots: vec![RootLine { san: "e4".into(), counts: [1; SEARCH_PLIES] }],
+            lines: vec!["e4".into(), "e4 e5".into()],
+            store,
+            elapsed: Duration::from_millis(10),
+            threads: 1,
+        };
+        let mut buf = Vec::new();
+        write_future(&mut buf, Color::White, &report).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("Total search nodes: 124,132,536"));
+        assert!(text.contains("Every sequence of up to 3 individual moves"));
+        assert!(text.contains("e4 e5\n"));
+        assert!(text.contains("STORED STRATEGY EVIDENCE"));
+        let parsed = FutureStore::from_text(&text).unwrap();
+        assert_eq!(parsed.fen, report.fen);
+        assert_eq!(parsed.entries, report.store.entries);
+        assert_eq!(parsed.entries["e2e4 e7e5"].first[1][1][4], 6);
     }
 }

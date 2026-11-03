@@ -1,3 +1,6 @@
 /target
 /game_files
 /.idea
+
+# Binary evidence caches written beside a future-search file. The text file is the record.
+*.evidence

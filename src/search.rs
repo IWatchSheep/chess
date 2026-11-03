@@ -178,45 +178,213 @@ impl FutureStore {
 
     /// Read the evidence back from the lines of a future file.
     pub fn from_text(text: &str) -> Option<FutureStore> {
+        Self::from_bytes(text.as_bytes())
+    }
+
+    /// Read the evidence back from the bytes of a future file.
+    ///
+    /// Same result as [`from_text`](Self::from_text). The sequence listing
+    /// between `Every sequence of up to` and `STORED STRATEGY EVIDENCE` is not
+    /// walked line by line when that span contains no `E ` line. That listing
+    /// is the bulk of a future file, and the writer never puts an evidence line
+    /// in it. A file that does is scanned in full, so a hand-written file still
+    /// parses the way it used to.
+    pub fn from_bytes(text: &[u8]) -> Option<FutureStore> {
+        let (head, tail) = evidence_regions(text);
         let mut fen = None;
         let mut complete = false;
         let mut entries = HashMap::new();
-        for line in text.lines() {
-            if let Some(f) = line.strip_prefix("Position: ") {
-                fen = Some(f.trim().to_string());
-            } else if line.starts_with("Status: complete") {
-                complete = true;
-            } else if let Some(rest) = line.strip_prefix("E ") {
-                // E <key|-> W <p> <c> B <p> <c>   (the key may hold spaces)
-                let w = rest.rfind(" W ")?;
-                let key = &rest[..w];
-                let parts: Vec<&str> = rest[w + 1..].split_whitespace().collect();
-                if parts.len() != 6 || parts[0] != "W" || parts[3] != "B" {
-                    return None;
-                }
-                let parse = |s: &str| -> Option<[u8; N]> {
-                    if s.len() != N {
-                        return None;
-                    }
-                    let mut a = [0u8; N];
-                    for (i, c) in s.bytes().enumerate() {
-                        a[i] = c.checked_sub(b'0').filter(|d| *d <= 9)?;
-                    }
-                    Some(a)
-                };
-                let mut e = Evidence::default();
-                e.first[0][0] = parse(parts[1])?;
-                e.first[0][1] = parse(parts[2])?;
-                e.first[1][0] = parse(parts[4])?;
-                e.first[1][1] = parse(parts[5])?;
-                entries.insert(if key == "-" { String::new() } else { key.to_string() }, e);
-            }
+        parse_evidence_lines(head, &mut fen, &mut complete, &mut entries)?;
+        if !tail.is_empty() {
+            parse_evidence_lines(tail, &mut fen, &mut complete, &mut entries)?;
         }
         if !complete {
             return None;
         }
         Some(FutureStore { fen: fen?, entries })
     }
+
+    /// Compact binary form of this store. This is a cache of the text evidence,
+    /// not a replacement for the future-search file (Step 15.5).
+    pub fn to_evidence_bytes(&self) -> Vec<u8> {
+        let mut keys: Vec<&String> = self.entries.keys().collect();
+        keys.sort();
+        let mut out = Vec::new();
+        push_u32(&mut out, self.fen.len() as u32);
+        out.extend_from_slice(self.fen.as_bytes());
+        push_u32(&mut out, keys.len() as u32);
+        for key in keys {
+            push_u32(&mut out, key.len() as u32);
+            out.extend_from_slice(key.as_bytes());
+            let evidence = &self.entries[key];
+            for color in 0..2 {
+                for kind in 0..2 {
+                    out.extend_from_slice(&evidence.first[color][kind]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Inverse of [`to_evidence_bytes`](Self::to_evidence_bytes). A short or
+    /// corrupt buffer is `None`, so the caller falls back to the text file.
+    pub fn from_evidence_bytes(bytes: &[u8]) -> Option<FutureStore> {
+        let mut i = 0;
+        let fen_len = take_u32(bytes, &mut i)? as usize;
+        if fen_len > bytes.len().saturating_sub(i) {
+            return None;
+        }
+        let fen = std::str::from_utf8(bytes.get(i..i + fen_len)?).ok()?.to_string();
+        i += fen_len;
+        let count = take_u32(bytes, &mut i)? as usize;
+        let min_entry = 4 + EVIDENCE_BYTES;
+        if count > bytes.len().saturating_sub(i) / min_entry {
+            return None;
+        }
+        let mut entries = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let key_len = take_u32(bytes, &mut i)? as usize;
+            if key_len > bytes.len().saturating_sub(i) {
+                return None;
+            }
+            let key = std::str::from_utf8(bytes.get(i..i + key_len)?).ok()?.to_string();
+            i += key_len;
+            let raw = bytes.get(i..i + EVIDENCE_BYTES)?;
+            i += EVIDENCE_BYTES;
+            let mut evidence = Evidence::default();
+            let mut at = 0;
+            for color in 0..2 {
+                for kind in 0..2 {
+                    evidence.first[color][kind].copy_from_slice(&raw[at..at + N]);
+                    at += N;
+                }
+            }
+            entries.insert(key, evidence);
+        }
+        if i != bytes.len() {
+            return None;
+        }
+        Some(FutureStore { fen, entries })
+    }
+}
+
+/// `first[color][kind][strategy]`: two colors, two kinds, [`N`] strategies.
+const EVIDENCE_BYTES: usize = 2 * 2 * N;
+
+fn push_u32(out: &mut Vec<u8>, n: u32) {
+    out.extend_from_slice(&n.to_le_bytes());
+}
+
+fn take_u32(bytes: &[u8], i: &mut usize) -> Option<u32> {
+    let raw = bytes.get(*i..*i + 4)?;
+    *i += 4;
+    Some(u32::from_le_bytes(raw.try_into().ok()?))
+}
+
+/// Split a future file into the header and the evidence section when the
+/// sequence listing in between cannot hold an evidence line.
+fn evidence_regions(text: &[u8]) -> (&[u8], &[u8]) {
+    let Some(seq) = find_bytes(text, b"\nEvery sequence of up to ") else {
+        return (text, &[]);
+    };
+    let Some(rel) = find_bytes(&text[seq..], b"STORED STRATEGY EVIDENCE") else {
+        return (text, &[]);
+    };
+    let marker = seq + rel;
+    if region_has_e_line(&text[seq..marker]) {
+        (text, &[])
+    } else {
+        (&text[..seq], &text[marker..])
+    }
+}
+
+fn region_has_e_line(region: &[u8]) -> bool {
+    region.starts_with(b"E ") || find_bytes(region, b"\nE ").is_some()
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn rfind_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).rposition(|w| w == needle)
+}
+
+fn parse_evidence_lines(
+    text: &[u8],
+    fen: &mut Option<String>,
+    complete: &mut bool,
+    entries: &mut HashMap<String, Evidence>,
+) -> Option<()> {
+    let mut i = 0;
+    while i < text.len() {
+        let newline = text[i..].iter().position(|&c| c == b'\n').map(|p| i + p);
+        let end = newline.unwrap_or(text.len());
+        let mut line = &text[i..end];
+        if line.last() == Some(&b'\r') {
+            line = &line[..line.len() - 1];
+        }
+        i = match newline {
+            Some(n) => n + 1,
+            None => text.len(),
+        };
+        if let Some(rest) = line.strip_prefix(b"Position: ") {
+            *fen = Some(utf8_trimmed(rest)?);
+        } else if line.starts_with(b"Status: complete") {
+            *complete = true;
+        } else if let Some(rest) = line.strip_prefix(b"E ") {
+            let w = rfind_bytes(rest, b" W ")?;
+            let key = &rest[..w];
+            let parts = split_ws(&rest[w + 1..]);
+            if parts.len() != 6 || parts[0] != b"W" || parts[3] != b"B" {
+                return None;
+            }
+            let mut evidence = Evidence::default();
+            evidence.first[0][0] = parse_digits(parts[1])?;
+            evidence.first[0][1] = parse_digits(parts[2])?;
+            evidence.first[1][0] = parse_digits(parts[4])?;
+            evidence.first[1][1] = parse_digits(parts[5])?;
+            let key = if key == b"-" { String::new() } else { utf8_trimmed(key)? };
+            entries.insert(key, evidence);
+        }
+    }
+    Some(())
+}
+
+fn utf8_trimmed(bytes: &[u8]) -> Option<String> {
+    let bytes = trim_ascii(bytes);
+    Some(std::str::from_utf8(bytes).ok()?.to_string())
+}
+
+fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|c| c.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(|c| c.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn split_ws(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes.split(|c| c.is_ascii_whitespace()).filter(|part| !part.is_empty()).collect()
+}
+
+fn parse_digits(bytes: &[u8]) -> Option<[u8; N]> {
+    if bytes.len() != N {
+        return None;
+    }
+    let mut digits = [0u8; N];
+    for (i, c) in bytes.iter().enumerate() {
+        digits[i] = c.checked_sub(b'0').filter(|d| *d <= 9)?;
+    }
+    Some(digits)
 }
 
 /// Subtree sizes for one first move. `counts[d]` is the number of sequences of
